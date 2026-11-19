@@ -66,8 +66,8 @@ def validate(data):
         raise APIError(400, 'start and end must be finite seconds')
     if start < 0 or start > 86400 or end <= start or end > 86400 or end - start > MAX_CLIP:
         raise APIError(400, 'Choose a valid range no longer than 900 seconds within the first 24 hours')
-    if data.get('format') != 'mp4' or data.get('quality') != '720':
-        raise APIError(400, 'Only format mp4 and quality 720 are supported')
+    if data.get('format') != 'mp4' or data.get('quality') not in ('720', '1080'):
+        raise APIError(400, 'Only format mp4 and quality 720 or 1080 are supported')
     return url, float(start), float(end)
 
 def run_command(command, timeout, cwd):
@@ -97,6 +97,7 @@ def run_command(command, timeout, cwd):
 
 def make_clip(data, directory):
     url, start, end = validate(data)
+    quality = int(data['quality'])
     ytdlp, ffmpeg = shutil.which('yt-dlp'), shutil.which('ffmpeg')
     if not ytdlp or not ffmpeg:
         raise APIError(503, 'Install yt-dlp and ffmpeg and add them to PATH')
@@ -104,14 +105,19 @@ def make_clip(data, directory):
     run_command([ytdlp, '--ignore-config', '--no-plugin-dirs', '--no-playlist', '--no-progress', '--quiet',
                  '--no-warnings', '--no-part', '--max-filesize', '256M', '--socket-timeout', '20',
                  '--retries', '2', '--fragment-retries', '2', '--force-keyframes-at-cuts', '--download-sections',
-                 '*%.3f-%.3f' % (start, end), '-f', 'bv*[height<=720]+ba/b[height<=720]/b',
+                 '*%.3f-%.3f' % (start, end), '-f', 'bv*+ba/b', '-S', 'res:%d' % quality,
                  '-o', str(Path(directory) / 'input.%(ext)s'), '--', url], 480, directory)
     inputs = [p for p in Path(directory).glob('input.*') if p.is_file()]
     if len(inputs) != 1:
         raise APIError(502, 'Could not obtain a single video file for that range')
     output = Path(directory) / 'clip.mp4'
-    # Bounding box 1280x720; no upscaling. Keep video dimensions even for H.264.
-    scale = "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+    # Limit long and short edges according to orientation; never upscale.
+    # yt-dlp's res sorting also uses the shorter edge, including portraits.
+    long_edge = 1920 if quality == 1080 else 1280
+    scale = ("scale=w='min(iw,if(gte(iw,ih),%d,%d))':"
+             "h='min(ih,if(gte(iw,ih),%d,%d))':"
+             "force_original_aspect_ratio=decrease:force_divisible_by=2"
+             % (long_edge, quality, quality, long_edge))
     run_command([ffmpeg, '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i', str(inputs[0]),
                  '-t', '%.3f' % (end-start), '-map', '0:v:0', '-map', '0:a:0?',
                  '-vf', scale, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
