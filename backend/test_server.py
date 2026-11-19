@@ -20,9 +20,10 @@ class ValidationTests(unittest.TestCase):
         for url in ['http://youtube.com/watch?v=abcdefghijk', 'https://youtube.com.evil.test/watch?v=abcdefghijk', 'https://youtube.com@evil.test/watch?v=abcdefghijk', 'https://user@youtube.com/watch?v=abcdefghijk', 'https://www.youtube.com:444/watch?v=abcdefghijk', 'https://youtu.be/abcdefghijk/extra', 'https://www.youtube.com/watch?v=abcdefghijk&v=lmnopqrstuv', 'file:///etc/passwd']:
             with self.subTest(url=url), self.assertRaises(server.APIError): server.canonical_url(url)
     def test_clip_validation(self):
-        for change in [{'start': True}, {'start': float('nan')}, {'start': -1}, {'end': 905}, {'end': 3}, {'start': 10**1000}, {'format': 'webm'}, {'quality': 720}]:
+        for change in [{'start': True}, {'start': float('nan')}, {'start': -1}, {'end': 905}, {'end': 3}, {'start': 10**1000}, {'format': 'webm'}, {'quality': 720}, {'quality': 1080}, {'quality': '1440'}, {'quality': None}]:
             with self.subTest(change=change), self.assertRaises(server.APIError): server.validate({**DATA, **change})
         server.validate({**DATA, 'start': 0, 'end': 900})
+        server.validate({**DATA, 'quality': '1080'})
     def test_limits_and_config(self):
         with self.assertRaises(Exception): server.parse_origin('https://example.github.io/path')
         with self.assertRaises(Exception): server.parse_origin('http://evil.example')
@@ -102,26 +103,38 @@ class HTTPTests(unittest.TestCase):
 
 class PipelineTests(unittest.TestCase):
     def test_command_and_failure(self):
-        with patch.object(server.shutil,'which',side_effect=lambda n: '/fake/'+n), patch.object(server,'run_command',side_effect=server.APIError(502,'failed')) as run, tempfile.TemporaryDirectory() as d:
-            with self.assertRaises(server.APIError): server.make_clip(DATA,d)
-            args=run.call_args.args[0]
-            self.assertIn('--download-sections',args); self.assertIn('*3.000-5.000',args)
-            self.assertEqual(args[-1],'https://www.youtube.com/watch?v=abcdefghijk')
+        for quality in ('720', '1080'):
+            with self.subTest(quality=quality), patch.object(server.shutil,'which',side_effect=lambda n: '/fake/'+n), patch.object(server,'run_command',side_effect=server.APIError(502,'failed')) as run, tempfile.TemporaryDirectory() as d:
+                with self.assertRaises(server.APIError): server.make_clip({**DATA, 'quality':quality},d)
+                args=run.call_args.args[0]
+                self.assertIn('--download-sections',args); self.assertIn('*3.000-5.000',args)
+                self.assertEqual(args[args.index('-f')+1], 'bv*+ba/b')
+                self.assertEqual(args[args.index('-S')+1], 'res:'+quality)
+                self.assertEqual(args[-1],'https://www.youtube.com/watch?v=abcdefghijk')
     @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg and ffprobe required')
     def test_real_ffmpeg_pipeline_with_mock_download(self):
         original_run = server.run_command
         original_which = shutil.which
         def fake_which(name): return '/mock/yt-dlp' if name == 'yt-dlp' else original_which(name)
-        def fake_download(cmd, timeout, cwd):
-            if cmd[0] == '/mock/yt-dlp':
-                subprocess.run([original_which('ffmpeg'),'-v','error','-f','lavfi','-i','testsrc2=size=1920x1080:rate=10','-f','lavfi','-i','sine=frequency=440','-t','2','-c:v','mpeg4','-c:a','aac','-y',str(Path(cwd)/'input.mp4')],check=True)
-            else: original_run(cmd,timeout,cwd)
-        with tempfile.TemporaryDirectory() as d, patch.object(server.shutil,'which',side_effect=fake_which), patch.object(server,'run_command',side_effect=fake_download):
-            output=server.make_clip(DATA,d)
-            info=json.loads(subprocess.check_output([original_which('ffprobe'),'-v','error','-show_streams','-show_format','-of','json',str(output)]))
-            video=next(s for s in info['streams'] if s['codec_type']=='video')
-            audio=next(s for s in info['streams'] if s['codec_type']=='audio')
-            self.assertEqual((video['codec_name'],video['width'],video['height']),('h264',1280,720))
-            self.assertEqual(audio['codec_name'],'aac'); self.assertLessEqual(float(info['format']['duration']),2.1)
+        cases = [
+            ('1080', '1920x1080', (1920,1080)),
+            ('1080', '1080x1920', (1080,1920)),
+            ('1080', '2560x1440', (1920,1080)),
+            ('1080', '640x360', (640,360)),
+            ('720', '1920x1080', (1280,720)),
+            ('720', '1080x1920', (720,1280)),
+        ]
+        for quality, size, expected in cases:
+            def fake_download(cmd, timeout, cwd):
+                if cmd[0] == '/mock/yt-dlp':
+                    subprocess.run([original_which('ffmpeg'),'-v','error','-f','lavfi','-i',f'color=c=blue:size={size}:rate=5','-f','lavfi','-i','sine=frequency=440','-t','1','-c:v','mpeg4','-c:a','aac','-y',str(Path(cwd)/'input.mp4')],check=True)
+                else: original_run(cmd,timeout,cwd)
+            with self.subTest(quality=quality, size=size), tempfile.TemporaryDirectory() as d, patch.object(server.shutil,'which',side_effect=fake_which), patch.object(server,'run_command',side_effect=fake_download):
+                output=server.make_clip({**DATA, 'quality':quality},d)
+                info=json.loads(subprocess.check_output([original_which('ffprobe'),'-v','error','-show_streams','-show_format','-of','json',str(output)]))
+                video=next(s for s in info['streams'] if s['codec_type']=='video')
+                audio=next(s for s in info['streams'] if s['codec_type']=='audio')
+                self.assertEqual((video['codec_name'],video['width'],video['height']),('h264',*expected))
+                self.assertEqual(audio['codec_name'],'aac'); self.assertLessEqual(float(info['format']['duration']),2.1)
 
 if __name__ == '__main__': unittest.main()
