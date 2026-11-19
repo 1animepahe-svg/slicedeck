@@ -90,7 +90,7 @@
       clearDownload('yt-download', ytBlobUrl); ytBlobUrl = null;
       button.disabled = true;
       status('yt-status', 'Contacting your backend and preparing the clip. This may take a while.');
-      const response = await fetch(endpoint, { method: 'POST', headers: {'Content-Type':'application/json', 'Accept':'video/mp4, application/json'}, body: JSON.stringify({url:$('yt-url').value.trim(), start, end, format:'mp4', quality:'720'}) });
+      const response = await fetch(endpoint, { method: 'POST', headers: {'Content-Type':'application/json', 'Accept':'video/mp4, application/json'}, body: JSON.stringify({url:$('yt-url').value.trim(), start, end, format:'mp4', quality:'1080'}) });
       if (!response.ok) {
         let details = ''; try { const json = await response.json(); details = typeof json.error === 'string' ? json.error : typeof json.message === 'string' ? json.message : ''; } catch {}
         throw Error(`Backend returned HTTP ${response.status}${details ? ': ' + details.slice(0, 300) : '.'}`);
